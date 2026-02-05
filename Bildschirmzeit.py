@@ -1,99 +1,105 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import sqlite3
+from datetime import datetime, date, timedelta
+import plotly.express as px
 
-st.set_page_config(page_title="Jahresplan Bildschirmzeit", layout="wide")
+# --- KONFIGURATION ---
+st.set_page_config(page_title="ScreenTime Tracker", layout="wide")
 
-st.title("📊 Jahresplan deiner Bildschirmzeit")
+# --- DATENBANK LOGIK ---
+def init_db():
+    conn = sqlite3.connect("screentime.db")
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS sessions 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                  date TEXT, start_time TEXT, end_time TEXT, duration_min REAL)''')
+    conn.commit()
+    return conn
 
-st.markdown(
-    "Diese App zeigt dir deine Bildschirmzeit über ein ganzes Jahr – "
-    "nach Tagen und zusammengefasst nach Monaten."
-)
+def save_session(start_dt, end_dt):
+    duration = (end_dt - start_dt).total_seconds() / 60
+    conn = init_db()
+    c = conn.cursor()
+    c.execute("INSERT INTO sessions (date, start_time, end_time, duration_min) VALUES (?, ?, ?, ?)",
+              (start_dt.date().isoformat(), start_dt.strftime("%H:%M:%S"), 
+               end_dt.strftime("%H:%M:%S"), round(duration, 2)))
+    conn.commit()
+    conn.close()
 
-# -----------------------------------
-# Datenquelle auswählen
-# -----------------------------------
-st.sidebar.header("Datenquelle")
-data_source = st.sidebar.radio(
-    "Wie möchtest du deine Daten laden?",
-    ("Demo-Daten verwenden", "CSV-Datei hochladen")
-)
+def load_data():
+    conn = init_db()
+    df = pd.read_sql_query("SELECT * FROM sessions", conn)
+    conn.close()
+    if not df.empty:
+        df['date'] = pd.to_datetime(df['date'])
+    return df
 
-if data_source == "CSV-Datei hochladen":
-    uploaded_file = st.sidebar.file_uploader(
-        "CSV-Datei auswählen", type=["csv"]
-    )
+# --- UI LOGIK ---
+def main():
+    st.title("⏱️ ScreenTime Tracker")
+    st.markdown("Verfolge und analysiere deine Nutzungszeit.")
 
-    if uploaded_file is not None:
-        df = pd.read_csv(uploaded_file, parse_dates=["date"])
+    # Sidebar: Steuerung
+    st.sidebar.header("Steuerung")
+    
+    if "tracking" not in st.session_state:
+        st.session_state.tracking = False
+
+    if not st.session_state.tracking:
+        if st.sidebar.button("▶️ Session starten", use_container_width=True):
+            st.session_state.start_time = datetime.now()
+            st.session_state.tracking = True
+            st.rerun()
     else:
-        st.info("⬅️ Bitte lade eine CSV-Datei hoch.")
-        st.stop()
-else:
-    # Demo-Daten erzeugen
-    date_range = pd.date_range(start="2025-01-01", end="2025-12-31")
-    df = pd.DataFrame({
-        "date": date_range,
-        "screen_time_hours": (
-            2
-            + (date_range.dayofyear % 5)
-            + (date_range.dayofweek * 0.3)
-        )
-    })
+        st.sidebar.warning("Tracking läuft...")
+        start_time_display = st.session_state.start_time.strftime("%H:%M:%S")
+        st.sidebar.info(f"Startzeit: {start_time_display}")
+        
+        if st.sidebar.button("⏹️ Session stoppen", use_container_width=True):
+            end_time = datetime.now()
+            save_session(st.session_state.start_time, end_time)
+            st.session_state.tracking = False
+            st.success("Session gespeichert!")
+            st.rerun()
 
-# -----------------------------------
-# Daten vorbereiten
-# -----------------------------------
-df["month"] = df["date"].dt.to_period("M")
-monthly = df.groupby("month")["screen_time_hours"].sum()
+    # Daten laden
+    df = load_data()
 
-# -----------------------------------
-# Tagesansicht
-# -----------------------------------
-st.subheader("🗓️ Tagesansicht")
+    # Hauptbereich: Metriken
+    col1, col2, col3 = st.columns(3)
+    
+    if not df.empty:
+        today = pd.to_datetime(date.today())
+        last_7_days = today - timedelta(days=7)
+        
+        # Berechnung der Metriken
+        daily_sum = df[df['date'] == today]['duration_min'].sum()
+        weekly_sum = df[df['date'] >= last_7_days]['duration_min'].sum()
+        avg_sum = df.groupby('date')['duration_min'].sum().mean()
 
-fig1, ax1 = plt.subplots(figsize=(12, 4))
-ax1.plot(df["date"], df["screen_time_hours"])
-ax1.set_ylabel("Stunden")
-ax1.set_xlabel("Datum")
-ax1.set_title("Tägliche Bildschirmzeit")
-plt.xticks(rotation=45)
+        col1.metric("Heute", f"{int(daily_sum)} Min")
+        col2.metric("Letzte 7 Tage", f"{int(weekly_sum)} Min")
+        col3.metric("Ø pro Tag", f"{int(avg_sum)} Min")
 
-st.pyplot(fig1)
+        # Visualisierung
+        st.subheader("Nutzungsverlauf")
+        
+        # Aggregation nach Tag für den Chart
+        chart_data = df.groupby('date')['duration_min'].sum().reset_index()
+        
+        fig = px.bar(chart_data, x='date', y='duration_min', 
+                     title="Bildschirmzeit pro Tag",
+                     labels={'duration_min': 'Minuten', 'date': 'Datum'},
+                     color_discrete_sequence=['#00CC96'])
+        
+        st.plotly_chart(fig, use_container_width=True)
 
-# -----------------------------------
-# Monatsübersicht
-# -----------------------------------
-st.subheader("📆 Monatsübersicht (Jahresplan)")
+        # Tabellarische Ansicht
+        with st.expander("Rohdaten anzeigen"):
+            st.dataframe(df.sort_values(by="date", ascending=False), use_container_width=True)
+    else:
+        st.info("Noch keine Daten vorhanden. Starte deine erste Session in der Sidebar!")
 
-fig2, ax2 = plt.subplots(figsize=(10, 5))
-monthly.plot(kind="bar", ax=ax2)
-ax2.set_ylabel("Gesamtstunden")
-ax2.set_xlabel("Monat")
-ax2.set_title("Bildschirmzeit pro Monat")
-
-st.pyplot(fig2)
-
-# -----------------------------------
-# Statistiken
-# -----------------------------------
-st.subheader("📈 Statistiken")
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric(
-    "Durchschnitt / Tag",
-    f"{df['screen_time_hours'].mean():.2f} h"
-)
-
-col2.metric(
-    "Maximaler Tag",
-    f"{df['screen_time_hours'].max():.2f} h"
-)
-
-col3.metric(
-    "Gesamt im Jahr",
-    f"{df['screen_time_hours'].sum():.1f} h"
-)
-
+if __name__ == "__main__":
+    main()
